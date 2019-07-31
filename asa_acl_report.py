@@ -304,7 +304,7 @@ def format_data(search_ips, acl_names, acl):
         del x[5]        # Delete the 'any1' padding that was used
         del x[7]
     # 11. Create CSV from the output
-    with open(filename, 'w') as csvfile:
+    with open(filename, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(csv_columns)
         for data in acl4:
