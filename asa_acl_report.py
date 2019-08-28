@@ -1,6 +1,10 @@
+#!/usr/bin/env python
 # This script is to go through ASA access list (read from the device or a file) and produce human readable xl file.
+
 import csv
 import os
+import re
+from datetime import datetime
 from os.path import expanduser
 from sys import exit
 import ipaddress
@@ -12,20 +16,24 @@ from netmiko import Netmiko
 # Sets it has users home directory
 directory = expanduser("~")
 # To change the default header values in the CSV file
-csv_columns = ['ACL Name', 'Line Number', 'Access', 'Protocol', 'Source Address',
-               'Source Port', 'Destination Address', 'Destination Port', 'Hit Count']
+csv_columns = ['ACL Name', 'Line Number', 'Access', 'Protocol', 'Source Address', 'Source Port',
+               'Destination Address', 'Destination Port', 'Hit Count', 'Date Last Hit', 'Time Last Hit']
 
 ################################## Gather information from user ##################################
-# 1. Welcome and nformational screen
+# 1. Welcome and informational screen
 def start():
     global against_asa
 
     print()
-    print('=' * 30, 'ASA ACL Auditer v0.1 (tested 9.6)', '=' * 30)
-    print('This tool can be used to search IPs or all addresses in specific or all ACLs')
-    print('Make sure a space is left between entries and that capitliaztion is correct for ACL names')
+    print('=' * 30, 'ASA ACL Auditer v0.2 (tested 9.6)', '=' * 30)
+    print('This tool can be used to search specific IP addresses or all IPs in specific or all ACLs')
+    print('If filtering IP addresses leave a blank space between entries')
+    print('If filtering ACLs leave a blank space between entries and ensure capitliaztion is correct')
     print('The output will be stored in a CSV file saved in your the home directory')
-    print('If searching against a file put it in your home directory. The file has to contain expanded access-lists (show access-list)')
+    print()
+    print('If searching against a file put all the ACLs in the one file. They must be expanded access-lists (show access-list)')
+    print('To get the timestamp of last hit must have a second file with show access-list <name> brief for the ACLs (optional)')
+    print('Both the ACL abd ACL brief files should be stored in your home directory')
     print()
     # Options of whether to test against an ASA or a static file.
     while True:
@@ -42,7 +50,7 @@ def start():
             gather_info()
             break
         else:
-            print('\n!!! ERROR - Response not understood, please try again\n')
+            print('\n!!! ERROR - Response not understood, please try again !!!\n')
 
 # 2. Gets username/password and checks connectivity
 def test_login():
@@ -61,20 +69,18 @@ def test_login():
 
     gather_info()                   # Runs next function
 
-# 3. Gets the IPs to searched in ACLs, file name and collects data from the ASA
+# 3. Gathers the IP addresses and ACLs Names to be filtered as well as the name to use for the CSV file
 def gather_info():
     global filename
     # Prompts user to enter the IPs to be searched and makes a list of them.
-    print("\nEnter the IPs you want to search for in the ACLs seperated by a space.")
-    print("Leave blank if you want to search all IPs.")
+    print("\nIP: Enter the IPs you want to search for in the ACLs seperated by a space. Leave blank to search all IPs.")
     ips_entered = input('> ')
     search_ips = []
     if len(ips_entered) != 0:
         search_ips = ips_entered.split(' ')
 
     # Prompts user to enter the ACLs to be searched and makes a list of them.
-    print("\nEnter the names of the ACLs you want to search in followed by space.")
-    print("Leave blank if you want to search all ACLs: ")
+    print("\nACL: Enter the names of the ACLs you want to search in seperated by a space. Leave blank to search all ACLs.")
     acls_entered = input('> ')
     acl_names = []
     if len(acls_entered) != 0:
@@ -82,7 +88,7 @@ def gather_info():
 
     # Prompts user to enter the name of the file to be created. It it already exists prompts user to confirm they want to overwrite.
     while True:
-        print("\nEnter the name of the file to save the results to.")
+        print("\nFILE: Enter the name of the file to save the results to.")
         filename = input('> ')
         filename = os.path.join(directory, filename + ".csv")
         if os.path.exists(filename):
@@ -96,9 +102,10 @@ def gather_info():
     # Run next function
     verify(search_ips, acl_names)
 
-################################## Validates information and gets ACLs from ASA or file ##################################
-# 4. Verifies that the entered details is of a valid format
+################################## Validates entered information and gets ACLs/ ACL brief from ASA or file ##################################
+# 4. Verifies that the entered filter information is of a valid format
 def verify(search_ips, acl_names):
+    global acl_brief
     ip_error = []
     acl_error = []
 
@@ -110,70 +117,119 @@ def verify(search_ips, acl_names):
                 ipaddress.ip_address(ip)
             except ValueError as errorCode:
                 ip_error.append(str(errorCode))
-    # Runs if there was an ip address error (list not empty)
+    # Exits script if there was an ip address error (list not empty)
     if len(ip_error) != 0:
         print("!!!ERROR - Invalid IP addresses entered !!!")
         for x in ip_error:
             print(x)
         exit()
 
-    # ASA - Checks to make sure that the ACL names are on the ASA, if not exits the script
+    # ASA ONLY - Checks to make sure that the ACL names are on the ASA, if not exits the script
     if against_asa is True:
+        # Gathers list of access-group ACLs and group policy ACLs
+        asa_acls = []
+        acl = net_conn.send_command('show run access-group')
+        vpn_acl = net_conn.send_command('show run | in split-tunnel-network-list')
+        for x in acl.splitlines():
+            asa_acls.append(x.split(' ')[1])
+        for x in vpn_acl.splitlines():
+            asa_acls.append(x.split('value ')[1])
+
+        # If user entered a list of ACLs checks to make sure they are on the ASA
         if len(acl_names) != 0:
-            asa_acls = []
-            acl = net_conn.send_command('show run access-group')
-            vpn_acl = net_conn.send_command('show run | in split-tunnel-network-list')
-            # Gathers list of access-group ACLs and group policy ACLs
-            for x in acl.splitlines():
-                asa_acls.append(x.split(' ')[1])
-            for x in vpn_acl.splitlines():
-                asa_acls.append(x.split('value')[1])
             # Converts to a set to remove duplicates, then finds any element from acl_names not in acls
             acl_error = list(set(acl_names) - set(asa_acls))
-            # Runs if there was an acl name error (list not empty)
+            # Exits script if there was an acl name error (list not empty)
             if len(acl_error) != 0:
-                print("!!!ERROR - Invalid ACL names entered !!!")
+                print("!!! ERROR - Invalid ACL names entered !!!")
                 for x in acl_error:
                     print("'{}' does not appear to be an ACL on the ASA".format(x))
                 exit()
+        # Gather the hashes for all ACLs from show access-list brief
+        asa_acls = set(asa_acls)
+        acl_brief1 = ''
+        acl_brief = []
+        for x in asa_acls:
+            acl_brief1 = acl_brief1 + net_conn.send_command('show access-list {} brief'.format(x))
+        # Filter the output so only contains the hashes
+        for x in acl_brief1.splitlines():
+            if re.match("^\S{8}\s\S{8}\s", x):
+                acl_brief.append(x)
         # Run next function
         get_acl(search_ips, acl_names)
 
-   # FILE - Prompts user to enter the name of the file to be loaded. If cant find it prompts user to re-enter
+   # FILE ONLY - Prompts user to enter the name of the files to be loaded. If cant find them prompts user to re-enter
     elif against_asa is False:
-        while True:
-            print("\nEnter the full filename (including extension) of the file containing the ACLs. It must already be in your home directory.")
+        acl_file_exists = False
+        acl_brief_file_exists = False
+        print("\nThe results of show access-list and show access-list <name> brief must be in seperate files.")
+        print("Make sure that both files are already in your home directory before continuing.")
+
+        while acl_file_exists is False:
+            print("\nACL_FILE: Enter the full filename (including extension) of the file containing all the ACLs output.")
             filename = input('> ')
             filename = os.path.join(directory, filename)
-            if os.path.exists(filename):
-                with open(filename) as var:
-                    acl1 = var.read().splitlines()
-                # Cleans up ACL output so is same standard as ASA output.
-                for x in list(acl1):
-                    if ('show' in x) or ('#' in x) or ('elements' in x) or ('cached' in x) or ('alert-interval' in x) or ('remark' in x) or (len(x) == 0):
-                        acl1.remove(x)
-                # Creates just a list of ACL names to comapre againt user entered ACL names
-                file_acls = []
-                for x in acl1:
-                    y = x.lstrip()
-                    y = y.split(' ')
-                    file_acls.append(y[1])
-                # Converts to a set to remove duplicates, then finds any element from acl_names not in acls
-                acl_error = list(set(acl_names) - set(file_acls))
-                # Runs if there was an acl name error (list not empty)
-                if len(acl_error) != 0:
-                    print("!!!ERROR - Invalid ACL names entered !!!")
-                    for x in acl_error:
-                        print("'{}' does not appear to be an ACL in the file".format(x))
-                        exit()
-                else:
-                    filter_acl(search_ips, acl_names, acl1)       # runs next function
-                    break
-            else:
-                print('!!! ERROR - Cant find the file, was looking for {}'.format(filename))
+            if not os.path.exists(filename):
+                print('!!! ERROR - Cant find the file, was looking for {} !!!'.format(filename))
                 print('Make sure it is in home directory and named correctly before trying again.')
+            else:
+                acl_file_exists = True
 
-# 5a. Connects to the ASA and gathers the ACLs
+        while acl_brief_file_exists is False:
+            print("\n-ACL_BR_FILE: Enter the full filename (including extension) of the file containing the ACL brief output (optional).")
+            acl_brief2 = input('> ')
+            if len(acl_brief2) != 0:
+                acl_brief2 = os.path.join(directory, acl_brief2)
+                if not os.path.exists(acl_brief2):
+                    print('!!! ERROR - Cant find the file, was looking for {} !!!'.format(acl_brief2))
+                    print('Make sure it is in home directory and named correctly before trying again.')
+                else:
+                    acl_brief_file_exists = True
+            else:
+                acl_brief_file_exists = True
+
+        # Runs checks against the ACL file to make sure is valid and normalizes it
+        with open(filename) as var:
+            acl1 = var.read().splitlines()
+        # Remove all lines that arent ACEs
+        for x in list(acl1):
+            if (len(x) == 0) or ('show' in x) or ('access-list' not in x) or ('elements' in x) or ('cached' in x) or ('remark' in x):
+                acl1.remove(x)
+        # Exits script if no hitcnt as means user has done show run access-list
+        for x in acl1:
+            if 'hitcnt' not in x:
+                print('!!! ERROR - No hitcnt in {}, the file is incompatible with this script !!!'.format(filename))
+                print('Check the file and make sure you have done "show access-list" and NOT "show RUN access-list"')
+                exit()
+
+        # Creates a list of ACL names from the acl file to comapre against the user entered ACL names
+        file_acls = []
+        for x in acl1:
+            y = x.lstrip()
+            y = y.split(' ')
+            file_acls.append(y[1])
+        # Converts to a set to remove duplicates, then finds any element from acl_names not in acls
+        acl_error = list(set(acl_names) - set(file_acls))
+        # Exits script if there was an acl name error (list not empty)
+        if len(acl_error) != 0:
+            print("!!! ERROR - Invalid ACL names entered !!!")
+            for x in acl_error:
+                print("'{}' does not appear to be an ACL in the file".format(x))
+                exit()
+
+        # Grabs just lines with a hash from acl_brief by matching 8 characters, space, 8 characters
+        acl_brief = []
+        if len(acl_brief2) != 0:
+            with open(acl_brief2) as f:
+                acl_brief1 = f.read().splitlines()
+            for x in acl_brief1:
+                if re.match("^\S{8}\s\S{8}\s", x):
+                    acl_brief.append(x)
+        # Runs next function
+        filter_acl(search_ips, acl_names, acl1)
+
+################################## Gets or edits ACLs so only contain filtered IPs and ACLs ##################################
+# 5a. ASA ONLY - Connects to the ASA and gathers the ACLs
 def get_acl(search_ips, acl_names):
     acl = ''
     # To get all ACL entries from all ACLs
@@ -187,7 +243,7 @@ def get_acl(search_ips, acl_names):
     elif len(search_ips) != 0 and len(acl_names) == 0:
         search_ips = '|'.join(search_ips)
         acl = net_conn.send_command('show access-list | in {}'.format(search_ips))
-    # To get certain ACL entries from specificacls
+    # To get certain ACL entries from specific acls
     elif len(search_ips) != 0 and len(acl_names) != 0:
         search_ips = '|'.join(search_ips)
         for x in acl_names:
@@ -196,9 +252,13 @@ def get_acl(search_ips, acl_names):
     net_conn.disconnect()
     format_data(search_ips, acl_names, acl)
 
-# 5b. Searches through the file to filter only specified IPs and/or ACLs
+# 5b. FILE ONLY - Searches through the ACL file to filter only specified IPs and/or ACLs
 def filter_acl(search_ips, acl_names, acl1):
-    if (len(acl_names) != 0) and (len(search_ips) != 0):
+    # To get all ACL entries from all ACLs
+    if len(search_ips) == 0 and len(acl_names) == 0:
+        acl = acl1
+    # To get certain ACL entries from specific acls    
+    elif (len(acl_names) != 0) and (len(search_ips) != 0):
         acl2 = []
         for x in acl_names:
             for y in acl1:
@@ -209,12 +269,14 @@ def filter_acl(search_ips, acl_names, acl1):
             for y in acl2:
                 if x in y:
                     acl.append(y)
+    # To get all ACL entries from specific ACLs
     elif len(acl_names) != 0:
         acl = []
         for x in acl_names:
             for y in acl1:
                 if x in y:
                     acl.append(y)
+    # To get certain ACL entries from all acls
     elif len(search_ips) != 0:
         acl = []
         for x in search_ips:
@@ -225,15 +287,15 @@ def filter_acl(search_ips, acl_names, acl1):
     acl = '\n'.join(acl)
     format_data(search_ips, acl_names, acl)
 
-################################## Sanitize the data ##################################
+################################## Sanitize the data - Create structured data ##################################
 def format_data(search_ips, acl_names, acl):
-    # 4. Pad out any and remove hitcnt text by replacing fields, all dont whilst file is one big string
+    # 4. Pad out any and remove hitcnt text by replacing fields. Is all done whilst file is one big string
     acl = acl.replace('any4', 'any')    # Incase any4 acls used for packet captures
     acl = acl.replace('any', 'any any1')
     for elem in ['(hitcnt=', ')']:
         acl = acl.replace(elem, '')
 
-    # 5. Clean up ACL by removing remarks and informational data
+    # 5. Clean up ACL by removing remarks and informational data (from ASA output, file was already done)
     acl = acl.splitlines()
     for x in list(acl):
         if ('elements' in x) or ('cached' in x) or ('alert-interval' in x) or ('remark' in x) or (len(x) == 0):
@@ -248,9 +310,9 @@ def format_data(search_ips, acl_names, acl):
                 del y[z]
             if 'log' in y:              # If ACL is logging removes log and 3 fields after (log notifications interval 300)
                 del y[-6:-2]
-            acl1.append(y[:-1])         # Removes ACL hash from the end of the output
+            acl1.append(y)
 
-    # 7. Now got only data we need normalise source ports by joining range, removing eq and padding out if is no source port.
+    # 7. Now got only data we need normalise source ports by joining range, removing eq and padding out if is no source port
     acl2 = []
     for b in acl1:
         if b[6] == 'range':             # If has a source range of ports replace "range" with "start-end" port numbers
@@ -269,16 +331,16 @@ def format_data(search_ips, acl_names, acl):
     acl3 = []
     for b in acl2:
         if 'range' in b:
-            c = b.pop(-3)
-            d = b.pop(-2)
-            b[-2] = c + '-' + d
+            c = b.pop(-4)
+            d = b.pop(-3)
+            b[-3] = c + '-' + d
         elif 'eq' in b:
-            del b[-3]
+            del b[-4]
         elif 'icmp' not in b:
-            (b.insert(-1, 'any_port'))
+            (b.insert(-2, 'any_port'))
         else:
-            if ('.' in b[-2]) or (b[-2] == 'any1'):
-                (b.insert(-1, 'any_port'))
+            if ('.' in b[-3]) or (b[-3] == 'any1'):
+                (b.insert(-2, 'any_port'))
         acl3.append(b)
 
     # 9. For all host entries delete host and add /32 subnet mask after the IP
@@ -291,7 +353,7 @@ def format_data(search_ips, acl_names, acl):
             del x[7]
             (x.insert(8, '255.255.255.255'))
         acl4.append(x)
-    # 10. Convert subnet mask to prefix and pad out old mask filed with 'any1'
+    # 10. Convert subnet mask to prefix and padout old mask with 'any1'
     for x in acl4:
         if x[4] != 'any':
             y = IPv4Network((x[4], x[5])).with_prefixlen
@@ -301,9 +363,29 @@ def format_data(search_ips, acl_names, acl):
             y = IPv4Network((x[7], x[8])).with_prefixlen
             x[7] = y
             x[8] = 'any1'
-        del x[5]        # Delete the 'any1' padding that was used
+        del x[5]        # Delete the 'any1' padding that was used earlier
         del x[7]
-    # 11. Create CSV from the output
+    lasthit_time(acl4)
+
+# 11. Adds date and time for last hit for any ACEs with a hitcnt. This info is got as unix hash from last element in show access-list <name> brief
+def lasthit_time(acl4):
+    # If ACE has a matching hash entry (has a hitcnt) last hit date and time will be added
+    for lines in acl4:              # loop through ACL
+        for hashes in acl_brief:     # Loop through acl_brief
+            if hashes.split(' ')[0] in lines[-1]:    # If hash is in acl
+                unix_time = hashes.split(' ')[-1]
+                # Convert last element to decimal and get human-readable time from the hex time
+                human_time = datetime.fromtimestamp(int(unix_time, 16)).strftime('%Y-%m-%d %H:%M:%S').split(' ')
+                lines[-1] = human_time[0]
+                lines.append(human_time[1])
+    # If ACE does not have a matching hash entry hash is stripped out
+    for lines in acl4:
+        if len(lines) == 10:
+            del lines[-1]
+    create_csv(acl4)
+
+# 12. Create CSV from the output using the header Fields in the global variables at the beginning
+def create_csv(acl4):
     with open(filename, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(csv_columns)
@@ -312,21 +394,12 @@ def format_data(search_ips, acl_names, acl):
     print()
     print('File {} has been created'.format(filename))
 
-# Starts the script
+# 13. Starts the script
 start()
 
 ################################## Run or test elements of script ##################################
 
-#filename = 'acl_name1.csv'
-#search_ips = []
-#acl_names = []
-#search_ips = ['10.10.10.81', '10.10.10.3']
-#acl_names = ['media', 'data']
-#with open('acl.txt') as var:
-#    acl = var.read()
-
+#### Test ASA run but skip entering login details
+#net_conn = Netmiko(host='10.10.10.1', username='ste', password='xxx', device_type='cisco_asa')
 #against_asa = True
 #gather_info()
-#verify(search_ips, acl_names)
-#get_acl(search_ips, acl_names)
-#format_data(search_ips, acl_names, acl)
