@@ -153,7 +153,7 @@ def verify(search_ips, acl_names):
             acl_brief1 = acl_brief1 + net_conn.send_command('show access-list {} brief'.format(x))
         # Filter the output so only contains the hashes
         for x in acl_brief1.splitlines():
-            if re.match("^\S{8}\s\S{8}\s", x):
+            if re.match(r"^\S{8}\s\S{8}\s", x):
                 acl_brief.append(x)
         # Run next function
         get_acl(search_ips, acl_names)
@@ -223,7 +223,7 @@ def verify(search_ips, acl_names):
             with open(acl_brief2) as f:
                 acl_brief1 = f.read().splitlines()
             for x in acl_brief1:
-                if re.match("^\S{8}\s\S{8}\s", x):
+                if re.match(r"^\S{8}\s\S{8}\s", x):
                     acl_brief.append(x)
         # Runs next function
         filter_acl(search_ips, acl_names, acl1)
