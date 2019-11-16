@@ -1,6 +1,6 @@
 # From http://networkbit.ch/python-jinja-template/
 # Used to render a yaml file with a jinja2 template and print the output - good for testing Ansible
-# Run the script using "python3 render_yaml.py input.yml template.j2"
+# Run the script using "python3 render_jinja.py input.yml template.j2"
 
 from sys import argv            #Imports argv so that can enter values when run the script
 from jinja2 import Environment, FileSystemLoader    #Imports from Jinja2
